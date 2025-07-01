@@ -1,5 +1,5 @@
 # wimgapi-cmd
-调用 wimgapi.dll 来安装、查询镜像信息的工具
+调用 wimgapi.dll 来安装、备份、查询镜像信息的工具
 
 ## 命令用法：
 
