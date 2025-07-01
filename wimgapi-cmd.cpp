@@ -1,7 +1,6 @@
 #include <Windows.h>
-#include <iostream>
-#include <stdio.h>
 #include <strsafe.h>
+#include <string>
 
 enum
 {
@@ -109,6 +108,18 @@ typedef BOOL(WINAPI* WIMSetTemporaryPathPtr)(
     _In_ PCWSTR pszPath
     );
 
+typedef HANDLE(WINAPI* WIMCaptureImagePtr)(
+    _In_ HANDLE  hWim,
+    _In_ PCWSTR  pszPath,
+    _In_ DWORD   dwCaptureFlags
+    );
+
+typedef BOOL(WINAPI* WIMSetImageInformationPtr)(
+    _In_ HANDLE hWim,
+    _In_ PVOID  pvImageInfo,
+    _In_ DWORD  cbImageInfo
+    );
+
 // 全局函数指针
 WIMCreateFilePtr pfnWIMCreateFile = NULL;
 WIMLoadImagePtr pfnWIMLoadImage = NULL;
@@ -119,6 +130,8 @@ WIMRegisterMessageCallbackPtr pfnWIMRegisterMessageCallback = NULL;
 WIMUnregisterMessageCallbackPtr pfnWIMUnregisterMessageCallback = NULL;
 WIMCloseHandlePtr pfnWIMCloseHandle = NULL;
 WIMSetTemporaryPathPtr pfnWIMSetTemporaryPath = NULL;
+WIMCaptureImagePtr pfnWIMCaptureImage = NULL; // 修正为3个参数
+WIMSetImageInformationPtr pfnWIMSetImageInformation = NULL; // 新增函数指针
 
 // 加载wimgapi.dll
 HMODULE LoadWimgapiDLL() {
@@ -158,6 +171,8 @@ BOOL InitWimgapiFunctions(HMODULE hDll) {
     pfnWIMUnregisterMessageCallback = (WIMUnregisterMessageCallbackPtr)GetProcAddress(hDll, "WIMUnregisterMessageCallback");
     pfnWIMCloseHandle = (WIMCloseHandlePtr)GetProcAddress(hDll, "WIMCloseHandle");
     pfnWIMSetTemporaryPath = (WIMSetTemporaryPathPtr)GetProcAddress(hDll, "WIMSetTemporaryPath");
+    pfnWIMCaptureImage = (WIMCaptureImagePtr)GetProcAddress(hDll, "WIMCaptureImage"); // 修正为3个参数
+    pfnWIMSetImageInformation = (WIMSetImageInformationPtr)GetProcAddress(hDll, "WIMSetImageInformation"); // 新增函数
 
     if (!pfnWIMCreateFile) wprintf(L"Failed to load WIMCreateFile\n");
     if (!pfnWIMLoadImage) wprintf(L"Failed to load WIMLoadImage\n");
@@ -166,10 +181,13 @@ BOOL InitWimgapiFunctions(HMODULE hDll) {
     if (!pfnWIMGetImageInformation) wprintf(L"Failed to load WIMGetImageInformation\n");
     if (!pfnWIMCloseHandle) wprintf(L"Failed to load WIMCloseHandle\n");
     if (!pfnWIMSetTemporaryPath) wprintf(L"Failed to load WIMSetTemporaryPath\n");
+    if (!pfnWIMCaptureImage) wprintf(L"Failed to load WIMCaptureImage\n");
+    if (!pfnWIMSetImageInformation) wprintf(L"Failed to load WIMSetImageInformation\n");
 
     return pfnWIMCreateFile && pfnWIMLoadImage && pfnWIMApplyImage &&
         pfnWIMGetImageCount && pfnWIMGetImageInformation &&
-        pfnWIMCloseHandle && pfnWIMSetTemporaryPath;
+        pfnWIMCloseHandle && pfnWIMSetTemporaryPath &&
+        pfnWIMCaptureImage && pfnWIMSetImageInformation;
 }
 
 // 安全释放内存
@@ -205,16 +223,16 @@ void SafePrintf(LPCWSTR format, ...) {
 
 // 进度回调函数
 DWORD WINAPI ProgressCallback(DWORD dwMessageId, WPARAM wParam, LPARAM lParam, PVOID pvUserData) {
-    //std::cout << dwMessageId << std::endl;
     if (dwMessageId == WIM_MSG_PROGRESS) {
         DWORD dwPercent = (DWORD)wParam;
-        SafePrintf(L"Installing... %lu%%\r", dwPercent);
+        SafePrintf(L"\rProgress: %lu%%", dwPercent);
     }
     return 0;
 }
 
 // 安装镜像
 BOOL InstallImage(LPCWSTR wimPath, DWORD imageIndex, LPCWSTR installPath) {
+    // 打开WIM文件
     DWORD creationResult = 0;
     HANDLE hWim = pfnWIMCreateFile(wimPath, GENERIC_READ, OPEN_EXISTING, 0, 0, &creationResult);
     if (hWim == INVALID_HANDLE_VALUE) {
@@ -222,23 +240,29 @@ BOOL InstallImage(LPCWSTR wimPath, DWORD imageIndex, LPCWSTR installPath) {
         return FALSE;
     }
 
+    // 设置临时目录
     BOOL bResult = FALSE;
     WCHAR tempPath[MAX_PATH] = { 0 };
     if (GetTempPathW(MAX_PATH, tempPath)) {
         if (!pfnWIMSetTemporaryPath(hWim, tempPath)) {
-            SafePrintf(L"Warning: Failed to set temporary path. Error: %lu\n", GetLastError());
+            SafePrintf(L"Setting temporary directory failed. Error: %lu\n", GetLastError());
         }
     }
 
+    // 加载映像
     HANDLE hImage = pfnWIMLoadImage(hWim, imageIndex);
     if (hImage == INVALID_HANDLE_VALUE) {
-        SafePrintf(L"Failed to load image. Error: %lu\n", GetLastError());
+        SafePrintf(L"Loading image failed. Error: %lu\n", GetLastError());
         goto CLEANUP;
     }
 
-    // 修复：注册全局进度回调函数（将第一个参数改为NULL）
+    // 注册进度回调
     pfnWIMRegisterMessageCallback(hWim, (FARPROC)ProgressCallback, NULL);
 
+    SafePrintf(L"Apply the %s to %s\n", (LPCWSTR)wimPath, (LPCWSTR)installPath);
+    SafePrintf(L"Progress: 0%%");
+
+    // 应用映像
     if (pfnWIMApplyImage(hImage, installPath, 0x00000100)) {
         SafePrintf(L"\nImage applied successfully\n");
         bResult = TRUE;
@@ -247,12 +271,12 @@ BOOL InstallImage(LPCWSTR wimPath, DWORD imageIndex, LPCWSTR installPath) {
         SafePrintf(L"\nImage application failed. Error: %lu\n", GetLastError());
     }
 
-    // 注销全局进度回调函数（将第一个参数改为NULL）
-    pfnWIMUnregisterMessageCallback(NULL, (FARPROC)ProgressCallback);
+    // 注销进度回调
+    pfnWIMUnregisterMessageCallback(hWim, (FARPROC)ProgressCallback);
 
-    pfnWIMCloseHandle(hImage);
-
+    // 关闭映像句柄
 CLEANUP:
+    pfnWIMCloseHandle(hImage);
     pfnWIMCloseHandle(hWim);
     return bResult;
 }
@@ -365,7 +389,7 @@ void GetImageInfo(LPCWSTR wimPath, DWORD imageIndex) {
     PVOID pvImageInfo = NULL;
     DWORD cbImageInfo = 0;
     if (!pfnWIMGetImageInformation(hWim, &pvImageInfo, &cbImageInfo)) {
-        SafePrintf(L"Failed to get image information. Error: %lu\n", GetLastError());
+        SafePrintf(L"Image information acquisition failed. Error: %lu\n", GetLastError());
         pfnWIMCloseHandle(hWim);
         return;
     }
@@ -436,6 +460,185 @@ void GetImageInfo(LPCWSTR wimPath, DWORD imageIndex) {
     pfnWIMCloseHandle(hWim);
 }
 
+// 设置镜像元数据
+BOOL SetImageMetadata(HANDLE hWim, DWORD imageIndex, LPCWSTR imageName, LPCWSTR description) {
+    // 获取整个WIM的XML信息
+    PVOID pvImageInfo = NULL;
+    DWORD cbImageInfo = 0;
+    pfnWIMGetImageInformation(hWim, &pvImageInfo, &cbImageInfo);
+
+    // 转换为可修改的字符串
+    std::wstring xmlInfo((LPCWSTR)pvImageInfo);
+    LocalFree(pvImageInfo);
+
+    // 构建目标镜像标签
+    WCHAR imageTag[128] = { 0 };
+    swprintf_s(imageTag, _countof(imageTag), L"<IMAGE INDEX=\"%lu\"", imageIndex);
+
+    // 查找目标镜像位置
+    size_t imageStart = xmlInfo.find(imageTag);
+
+    // 查找IMAGE结束位置
+    size_t imageEnd = xmlInfo.find(L"</IMAGE>", imageStart);
+
+    imageEnd += wcslen(L"</IMAGE>");
+
+    // 提取镜像XML片段
+    std::wstring imageXml = xmlInfo.substr(imageStart, imageEnd - imageStart);
+
+    // 查找并替换或添加元数据
+    auto UpdateOrAddTag = [&](const std::wstring& tag, const std::wstring& value) {
+        size_t startTagPos = imageXml.find(L"<" + tag + L">");
+        size_t endTagPos = imageXml.find(L"</" + tag + L">", startTagPos);
+
+        if (startTagPos != std::wstring::npos && endTagPos != std::wstring::npos) {
+            // 替换现有值
+            size_t contentStart = startTagPos + tag.length() + 2;
+            size_t contentLen = endTagPos - contentStart;
+            imageXml.replace(contentStart, contentLen, value);
+        }
+        else {
+            // 添加新标签
+            size_t insertPos = imageXml.find(L'>') + 1;
+            std::wstring newTag = L"<" + tag + L">" + value + L"</" + tag + L">\n";
+            imageXml.insert(insertPos, newTag);
+        }
+        };
+
+    // 更新映像名称、映像说明、显示名称、显示说明
+    if (imageName && wcslen(imageName) > 0) {
+        UpdateOrAddTag(L"NAME", imageName);
+        UpdateOrAddTag(L"DESCRIPTION", imageName);
+        UpdateOrAddTag(L"DISPLAYNAME", imageName);
+        UpdateOrAddTag(L"DISPLAYDESCRIPTION", imageName);
+    }
+
+    // 替换XML中的镜像片段
+    xmlInfo.replace(imageStart, imageEnd - imageStart, imageXml);
+
+    // 设置回WIM文件
+    if (!pfnWIMSetImageInformation(hWim, (PVOID)xmlInfo.c_str(), (DWORD)((xmlInfo.length() + 1) * sizeof(WCHAR)))) {
+        SafePrintf(L"Failed to set image information. Error: %lu\n", GetLastError());
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+// 备份系统镜像
+BOOL PackImage(LPCWSTR compression, LPCWSTR sourcePath, LPCWSTR backupPath, LPCWSTR imageName) {
+    // 解析压缩等级
+    DWORD compressionType = 0;
+    if (_wcsicmp(compression, L"none") == 0) {
+        compressionType = 0;
+    }
+    else if (_wcsicmp(compression, L"fast") == 0) {
+        compressionType = 1;
+    }
+    else if (_wcsicmp(compression, L"max") == 0) {
+        compressionType = 2;
+    }
+    else {
+        SafePrintf(L"Invalid compression level: %s\n", compression);
+        return FALSE;
+    }
+
+    // 获取后缀名，如果是esd就加大剂量
+    LPCWSTR ext = wcsrchr(backupPath, L'.');
+    if (ext && _wcsicmp(ext, L".esd") == 0) {
+        if (_wcsicmp(compression, L"none") == 0) {
+            compressionType = 1;
+        }
+        else if (_wcsicmp(compression, L"fast") == 0) {
+            compressionType = 2;
+        }
+        else if (_wcsicmp(compression, L"max") == 0) {
+            compressionType = 3;
+        }
+    }
+
+    // 检查备份文件是否存在
+    DWORD fileAttrib = GetFileAttributesW(backupPath);
+    BOOL fileExists = (fileAttrib != INVALID_FILE_ATTRIBUTES && !(fileAttrib & FILE_ATTRIBUTE_DIRECTORY));
+
+    // 设置WIM创建参数
+    DWORD creationDisposition = fileExists ? OPEN_EXISTING : CREATE_ALWAYS;
+    DWORD creationResult = 0;
+
+    // 打开或创建WIM文件
+    HANDLE hWim = pfnWIMCreateFile(
+        backupPath,
+        GENERIC_READ | GENERIC_WRITE,
+        creationDisposition,
+        0,
+        // 如果文件已存在，忽略压缩类型参数（使用原有压缩类型）
+        fileExists ? 0 : compressionType,
+        &creationResult
+    );
+
+    if (hWim == INVALID_HANDLE_VALUE) {
+        SafePrintf(L"Failed to %s backup file. Error: %lu\n",
+            fileExists ? L"open" : L"create", GetLastError());
+        return FALSE;
+    }
+
+    // 提示用户操作类型
+    if (fileExists) {
+        SafePrintf(L"Adding new image to existing file: %s\n", backupPath);
+    }
+    else {
+        SafePrintf(L"Creating new backup file: %s\n", backupPath);
+    }
+
+    // 设置临时目录
+    WCHAR tempPath[MAX_PATH] = { 0 };
+    if (GetTempPathW(MAX_PATH, tempPath)) {
+        if (!pfnWIMSetTemporaryPath(hWim, tempPath)) {
+            SafePrintf(L"Setting temporary directory failed. Error: %lu\n", GetLastError());
+            return FALSE;
+        }
+    }
+
+    // 注册进度回调
+    pfnWIMRegisterMessageCallback(hWim, (FARPROC)ProgressCallback, NULL);
+
+    SafePrintf(L"Starting backup from %s to %s\n", sourcePath, backupPath);
+    SafePrintf(L"Progress: 0%%");
+
+    // 捕获映像
+    HANDLE hImage = pfnWIMCaptureImage(
+        hWim,               // WIM句柄
+        sourcePath,         // 源路径
+        0                   // 捕获标志
+    );
+
+    BOOL bResult = FALSE;
+
+    if (hImage != INVALID_HANDLE_VALUE) {
+        // 获取新映像的索引
+        DWORD imageCount = pfnWIMGetImageCount(hWim);
+
+        // 设置映像元数据
+        if (imageCount > 0) {
+            SetImageMetadata(hWim, imageCount, imageName, imageName);
+        }
+
+        SafePrintf(L"\nImage backup successful\n");
+        bResult = TRUE;
+        pfnWIMCloseHandle(hImage);
+    }
+    else {
+        SafePrintf(L"\nImage backup failed. Error: %lu\n", GetLastError());
+    }
+
+    // 注销回调
+    pfnWIMUnregisterMessageCallback(hWim, (FARPROC)ProgressCallback);
+
+    // 关闭WIM句柄
+    pfnWIMCloseHandle(hWim);
+    return bResult;
+}
+
 // 显示帮助信息
 void ShowHelp() {
     const wchar_t* helpText = L"Usage: wimgapi-cmd.exe [options]\n"
@@ -443,6 +646,12 @@ void ShowHelp() {
         L"  -install <image_path> <image_index> <install_path> : Install image to target path\n"
         L"  -info <image_path> : Show number of images in WIM file\n"
         L"  -info <image_path> <image_index> : Show image information\n"
+        L"  -pack <compression_level> <source_path> <backup_path> <image_name> : Backup system\n"
+        L"      compression_level: none, fast, max\n"
+        L"      source_path: e.g. C:\n"
+        L"      backup_path: e.g. D:\\backup.wim or D:\\backup.esd\n"
+        L"      image_name: Name for the backup image (used for all metadata fields)\n"
+        L"  Note: If backup_path exists, a new image will be added to it instead of overwriting\n"
         L"  help or /? : Display this help message\n";
 
     SafeWriteConsole(helpText);
@@ -474,6 +683,11 @@ int wmain(int argc, wchar_t* argv[]) {
         }
         else {
             ShowHelp();
+            return 1;
+        }
+    }
+    else if (_wcsicmp(argv[1], L"-pack") == 0 && argc == 6) {
+        if (!PackImage(argv[2], argv[3], argv[4], argv[5])) {
             return 1;
         }
     }
