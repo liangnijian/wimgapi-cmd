@@ -33,5 +33,5 @@ wimgapi-cmd.exe -info K:\sources\install.wim 3
 -pack 压缩率 系统盘 备份路径 镜像名称
 
 示例：
-wimgapi-cmd.exe -pack fast C: "D:\系统备份\Win 10.wim" "Windows 10 专业版"
+wimgapi-cmd.exe -pack xpress C: "D:\系统备份\Win 10.wim" "Windows 10 专业版"
 ```
